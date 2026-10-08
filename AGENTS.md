@@ -8,3 +8,5 @@
 > Commits you push to the connected branch sync back to Lovable and show up in
 > the editor, so keep the branch in a working state.
 <!-- LOVABLE:END -->
+
+- Keep the IndicLive experience on TanStack file-based routes with shared state in React context and browser persistence in localStorage, because this frontend talks directly to an external WebSocket and needs no hosted backend.
