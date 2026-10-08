@@ -20,12 +20,13 @@ const seedGlossary: GlossaryTerm[] = [
   { id: "seed-azure", source: "Azure", target: "Azure", category: "Technical" },
 ];
 const defaults: Store = { settings: { wsUrl: DEFAULT_WS_URL, policy: "stable", reduceMotion: false }, glossary: seedGlossary, history: [], benchmark: [] };
-type Ctx = Store & { hydrated: boolean; saveSettings: (x: Partial<Settings>) => void; setGlossary: (x: GlossaryTerm[]) => void; setHistory: (x: HistoryItem[]) => void; setBenchmark: (x: BenchmarkRow[]) => void; clearAll: () => void };
+type Ctx = Store & { hydrated: boolean; connectionStatus: "offline" | "connecting" | "live" | "error"; setConnectionStatus: (x: "offline" | "connecting" | "live" | "error") => void; saveSettings: (x: Partial<Settings>) => void; setGlossary: (x: GlossaryTerm[]) => void; setHistory: (x: HistoryItem[]) => void; setBenchmark: (x: BenchmarkRow[]) => void; clearAll: () => void };
 const StoreContext = createContext<Ctx | null>(null);
 
 export function IndicLiveProvider({ children }: { children: ReactNode }) {
   const [store, setStore] = useState<Store>(defaults);
   const [hydrated, setHydrated] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState<"offline" | "connecting" | "live" | "error">("offline");
   useEffect(() => {
     try {
       const saved = localStorage.getItem(KEY);
@@ -42,14 +43,14 @@ export function IndicLiveProvider({ children }: { children: ReactNode }) {
   const setHistory = useCallback((history: HistoryItem[]) => setStore((s) => ({ ...s, history })), []);
   const setBenchmark = useCallback((benchmark: BenchmarkRow[]) => setStore((s) => ({ ...s, benchmark })), []);
   const clearAll = useCallback(() => { localStorage.removeItem(KEY); setStore(defaults); }, []);
-  const value = useMemo(() => ({ ...store, hydrated, saveSettings, setGlossary, setHistory, setBenchmark, clearAll }), [store, hydrated, saveSettings, setGlossary, setHistory, setBenchmark, clearAll]);
+  const value = useMemo(() => ({ ...store, hydrated, connectionStatus, setConnectionStatus, saveSettings, setGlossary, setHistory, setBenchmark, clearAll }), [store, hydrated, connectionStatus, saveSettings, setGlossary, setHistory, setBenchmark, clearAll]);
   return <StoreContext.Provider value={value}>{children}</StoreContext.Provider>;
 }
 export function useIndicStore() { const value = useContext(StoreContext); if (!value) throw new Error("IndicLiveProvider is missing"); return value; }
 
 export function emptyMetrics(): SessionMetrics { return { firstWordMs: null, finalMs: null, mtLast: null, mtAvg: null, mtP95: null, rewrittenChars: 0, rewriteEvents: 0, commitRatio: null, updatesPerSecond: null }; }
 export function useIndicSession() {
-  const { wsUrl, glossary } = useIndicStore();
+  const { wsUrl, glossary, setConnectionStatus } = useIndicStore();
   const socket = useRef<WebSocket | null>(null);
   const startedAt = useRef<number | null>(null);
   const firstSentAt = useRef<number | null>(null);
@@ -67,18 +68,18 @@ export function useIndicSession() {
   useEffect(() => cleanup, [cleanup]);
   const connect = useCallback((src: string, tgt: string, policy: Policy) => {
     cleanup(); setError(""); setFrame(null); setMetrics(emptyMetrics()); previousText.current = ""; mtSamples.current = []; committedChars.current = 0; displayChars.current = 0; updateCount.current = 0; startedAt.current = Date.now(); firstSentAt.current = null; speechEndedAt.current = null;
-    setStatus("connecting");
+    setStatus("connecting"); setConnectionStatus("connecting");
     try {
       const url = new URL(wsUrl); url.searchParams.set("src", src); url.searchParams.set("tgt", tgt); url.searchParams.set("policy", policy);
       const ws = new WebSocket(url.toString()); socket.current = ws;
       const timer = window.setTimeout(() => { if (ws.readyState !== WebSocket.OPEN) { setStatus("offline"); setError("Backend offline — unable to open a session."); ws.close(); } }, 4000);
-      ws.onopen = () => { clearTimeout(timer); setStatus("live"); ws.send(JSON.stringify({ type: "glossary", terms: glossary.map(({ source, target }) => ({ source, target })) })); };
-      ws.onerror = () => { setStatus("offline"); setError("Backend offline — check your WebSocket URL in Settings."); };
-      ws.onclose = () => { if (status === "live") setStatus("offline"); };
+      ws.onopen = () => { clearTimeout(timer); setStatus("live"); setConnectionStatus("live"); ws.send(JSON.stringify({ type: "glossary", terms: glossary.map(({ source, target }) => ({ source, target })) })); };
+      ws.onerror = () => { setStatus("offline"); setConnectionStatus("offline"); setError("Backend offline — check your WebSocket URL in Settings."); };
+      ws.onclose = () => { setStatus("offline"); setConnectionStatus("offline"); };
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data) as CaptionFrame | { error?: string };
-          if ("error" in data && data.error) { setError(data.error); setStatus("error"); return; }
+          if ("error" in data && data.error) { setError(data.error); setStatus("error"); setConnectionStatus("error"); return; }
           const next = data as CaptionFrame;
           if (typeof next.committed !== "string" || typeof next.tentative !== "string") return;
           const displayed = `${next.committed}${next.tentative ? ` ${next.tentative}` : ""}`.trim();
@@ -95,12 +96,12 @@ export function useIndicSession() {
           setFrame(next);
         } catch { setError("Received a message that could not be read."); }
       };
-    } catch { setStatus("offline"); setError("Backend offline — verify the WebSocket URL in Settings."); }
-  }, [cleanup, glossary, metrics.firstWordMs, status, wsUrl]);
+    } catch { setStatus("offline"); setConnectionStatus("offline"); setError("Backend offline — verify the WebSocket URL in Settings."); }
+  }, [cleanup, glossary, metrics.firstWordMs, setConnectionStatus, wsUrl]);
   const sendSimulation = useCallback((text: string) => { const ws = socket.current; if (!ws || ws.readyState !== WebSocket.OPEN) return false; if (firstSentAt.current === null) firstSentAt.current = Date.now(); ws.send(JSON.stringify({ type: "sim", text })); return true; }, []);
   const sendAudio = useCallback((audio: ArrayBuffer) => { const ws = socket.current; if (!ws || ws.readyState !== WebSocket.OPEN) return false; if (firstSentAt.current === null) firstSentAt.current = Date.now(); ws.send(audio); return true; }, []);
   const markSpeechEnd = useCallback(() => { speechEndedAt.current = Date.now(); }, []);
-  const stop = useCallback(() => { cleanup(); setStatus("offline"); }, [cleanup]);
+  const stop = useCallback(() => { cleanup(); setStatus("offline"); setConnectionStatus("offline"); }, [cleanup, setConnectionStatus]);
   return { status, error, frame, metrics, connect, sendSimulation, sendAudio, markSpeechEnd, stop };
 }
 
